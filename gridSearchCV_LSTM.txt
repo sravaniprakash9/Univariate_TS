@@ -1,0 +1,127 @@
+import pandas
+import matplotlib.pyplot as plt
+import numpy as np
+import math
+
+
+from sklearn.model_selection import GridSearchCV , cross_val_predict
+from sklearn.metrics import classification_report
+from keras.wrappers.scikit_learn import KerasClassifier
+
+from keras.models import Sequential
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error, accuracy_score
+
+from keras.layers import LSTM, Input, Dense, Reshape
+from keras.models import Model
+from keras.utils.vis_utils import plot_model
+from keras.activations import relu, elu
+
+from scipy.stats import bernoulli
+from sklearn.model_selection import train_test_split as split
+
+# load the dataset
+dataframe = pandas.read_csv('IBM.1Min.TradesOnly.20160128.csv', usecols=[6], engine='python', skipfooter=3)
+dataset = dataframe.values
+dataset = dataset.astype('float32')
+dataframe.head(5)
+
+# normalize the dataset
+scaler = MinMaxScaler(feature_range=(0, 1))
+dataset = scaler.fit_transform(dataset)
+
+# split into train and test sets
+train_size = int(len(dataset) * 0.70)
+test_size = len(dataset) - train_size
+train, test = dataset[0:train_size,:], dataset[train_size:len(dataset),:]
+
+
+ #convert an array of values into a dataset matrix
+def create_dataset(dataset, look_back):
+	dataX, dataY = [], []
+	for i in range(len(dataset)-look_back-1):
+		a = dataset[i:(i+look_back), 0]
+		dataX.append(a)
+		dataY.append(dataset[i + look_back, 0])
+	return np.array(dataX), np.array(dataY)
+
+# reshape into X=t and Y=t+1
+look_back = 1
+trainX, trainY = create_dataset(train, look_back)
+testX, testY = create_dataset(test, look_back)
+#plt.plot(train)
+
+# reshape input to be [samples, time steps, features]
+trainX = np.reshape(trainX, (trainX.shape[0], 1, trainX.shape[1]))
+testX = np.reshape(testX, (testX.shape[0], 1, testX.shape[1]))
+
+# Segment the train_data based on new window_size; split into train and validation (80/20)
+X_train, X_val, y_train, y_val = split(trainX, trainY, test_size = 0.20, random_state = 1120)
+
+# define the grid search parameters
+
+num_units=[10,12,24]
+activation=['relu','elu']
+batch_size = [10,20,30]
+epochs = [10, 50, 100]
+param_grid = dict(batch_size=batch_size, activation=activation, epochs=epochs, num_units=num_units)
+
+## Gridsearchcv model for optimizing
+def grid_model(activation='relu',num_units=1):
+    model = Sequential()
+    #model.add(Reshape((-1,1), input_shape=(1,)))
+    model.add(LSTM(num_units,input_shape=(1, look_back)))
+    model.add(Dense(1,activation=activation))
+    model.compile(loss='mean_squared_error', optimizer='adam',metrics=['acc'])
+    #model.fit(trainX, trainY, epochs=param_grid['epochs'], batch_size=param_grid['batch_size'], verbose=2,validation_data=[X_val, y_val])                    
+    return model
+
+model = KerasClassifier(build_fn=grid_model, verbose=0)
+grid = GridSearchCV(estimator=model, fit_params=param_grid, refit=True, param_grid=param_grid, n_jobs=-1)
+
+
+grid.fit(X_train, y_train, epochs=10, batch_size=10, validation_split=0.05, verbose=2)
+
+# summarize results
+print("Best: %f using %s" % (grid.best_score_, grid.best_params_))
+means = grid.cv_results_['mean_test_score']
+
+#Get best estimator with best params
+grid_best=grid.best_estimator_
+
+#Predict with best model
+trainPredict = grid_best.predict(X_train)
+testPredict = grid_best.predict(testX)
+
+#### Alternate - Train the model with best params
+model1 = Sequential()
+model1.add(LSTM(grid.best_params_['num_units'], input_shape=(1, look_back)))
+model1.add(Dense(1))
+model1.compile(loss='mean_squared_error',  optimizer='adam')
+model1.fit(X_train, y_train, epochs=grid.best_params_['epochs'], batch_size=grid.best_params_['batch_size'], verbose=2,validation_data=[X_val,y_val])
+
+# make predictions with newly trained model
+
+trainPredict = model1.predict(X_train)
+testPredict = model1.predict(testX)
+
+#Reshape 
+y_train=np.reshape(y_train,(y_train.shape[0],1))
+testY=np.reshape(testY,(testY.shape[0],1))
+
+
+# invert predictions
+trainPredict = scaler.inverse_transform(trainPredict)
+y_train = scaler.inverse_transform(y_train)
+testPredict = scaler.inverse_transform(testPredict)
+testY = scaler.inverse_transform(testY)
+
+# calculate root mean squared error
+trainScore = math.sqrt(mean_squared_error(y_train, trainPredict))
+print('Train Score: %.2f RMSE' % (trainScore))
+testScore = math.sqrt(mean_squared_error(testY, testPredict))
+print('Test Score: %.2f RMSE' % (testScore))
+
+# PLot graphs
+plt.plot(y_train)
+plt.plot(trainPredict)
